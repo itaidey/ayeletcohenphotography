@@ -1,0 +1,8 @@
+{
+  "name": "ayeletcohenphotography",
+  "compatibility_date": "2026-11-02",
+  "assets": { "directory": "./public" },
+  "routes": [
+    { "pattern": "ayeletcohenphotography.com", "custom_domain": true }
+  ]
+}

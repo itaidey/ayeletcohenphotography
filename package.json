@@ -1,0 +1,8 @@
+{
+  "name": "ayeletcohenphotography",
+  "private": true,
+  "scripts": {
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy"
+  }
+}

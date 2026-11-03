@@ -16,9 +16,12 @@
     }
     h1 { font-size: clamp(2rem, 7vw, 3.5rem); font-weight: 400; letter-spacing: .01em; }
     p { color: var(--muted); font-size: .85rem; letter-spacing: .28em; text-transform: uppercase; }
+    img { display: block; width: min(90vw, 56rem); max-height: 70svh; object-fit: contain; margin: 0 auto 1rem; }
+    img[hidden] { display: none; }
   </style>
 </head>
 <body>
+  <img src="/image" alt="Photograph by Ayelet Cohen" onerror="this.hidden = true">
   <h1>Ayelet Cohen</h1>
   <p>Photography</p>
 </body>

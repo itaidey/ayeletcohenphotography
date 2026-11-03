@@ -1,7 +1,20 @@
 {
   "name": "ayeletcohenphotography",
-  "compatibility_date": "2026-11-02",
-  "assets": { "directory": "./public" },
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-03",
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./public",
+    "run_worker_first": ["/image", "/upload", "/upload/*"]
+  },
+  "r2_buckets": [
+    { "binding": "IMAGES", "bucket_name": "ayeletcohenphotography-images" }
+  ],
+  "vars": {
+    "TEAM_DOMAIN": "https://tight-hall-851d.cloudflareaccess.com",
+    "POLICY_AUD": "2433b2c111ef8c52810323518030af9532043cbbf226bef4e11592681d20f0d1"
+  },
   "routes": [
     { "pattern": "ayeletcohenphotography.com", "custom_domain": true }
   ]

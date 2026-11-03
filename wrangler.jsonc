@@ -16,6 +16,7 @@
     "POLICY_AUD": "2433b2c111ef8c52810323518030af9532043cbbf226bef4e11592681d20f0d1"
   },
   "routes": [
-    { "pattern": "ayeletcohenphotography.com", "custom_domain": true }
+    { "pattern": "ayeletcohenphotography.com", "custom_domain": true },
+    { "pattern": "www.ayeletcohenphotography.com", "custom_domain": true }
   ]
 }

@@ -3,6 +3,8 @@
 // Access token itself and refuses requests when Access is not configured.
 
 const IMAGE_KEY = "current-image";
+const MAIN_HOST = "ayeletcohenphotography.com";
+const WWW_HOST = `www.${MAIN_HOST}`;
 const MAX_BYTES = 20 * 1024 * 1024;
 const CERT_TTL_MS = 10 * 60 * 1000;
 
@@ -171,7 +173,8 @@ function escapeHtml(value) {
 
 export default {
   async fetch(request, env) {
-    const { pathname } = new URL(request.url);
+    const url = new URL(request.url);
+    const { pathname } = url;
 
     if (pathname === "/image") {
       if (request.method !== "GET" && request.method !== "HEAD") return text("Method not allowed", 405);
@@ -179,6 +182,11 @@ export default {
     }
 
     if (pathname !== "/upload" && !pathname.startsWith("/upload/")) return text("Not found", 404);
+
+    // Access protects the main domain, so sign-in always happens there.
+    if (url.hostname === WWW_HOST) {
+      return Response.redirect(`https://${MAIN_HOST}${pathname}`, 302);
+    }
 
     if (!env.TEAM_DOMAIN || !env.POLICY_AUD) return text("Upload is not configured", 403);
     const token = request.headers.get("Cf-Access-Jwt-Assertion");

@@ -112,6 +112,17 @@ test("image is read-only and subpaths stay protected", async () => {
   assert.equal((await worker.fetch(get("/upload/x"), env())).status, 403);
   assert.equal((await worker.fetch(get("/upload/x", await token()), env())).status, 404);
 });
+test("www upload redirects to the main domain, www image still works", async () => {
+  const images = bucket();
+  const www = "https://www.ayeletcohenphotography.com";
+  const r = await worker.fetch(new Request(`${www}/upload`, { redirect: "manual" }), env(images));
+  assert.equal(r.status, 302);
+  assert.equal(r.headers.get("Location"), `${SITE}/upload`);
+  const post = new Request(`${www}/upload`, { method: "POST", body: png, redirect: "manual" });
+  assert.equal((await worker.fetch(post, env(images))).status, 302);
+  assert.equal(images.items.size, 0);
+  assert.equal((await worker.fetch(new Request(`${www}/image`), env(images))).status, 404);
+});
 test("certificates are cached", async () => {
   const before = certFetches;
   const t = await token();

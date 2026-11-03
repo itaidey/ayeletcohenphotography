@@ -9,20 +9,73 @@
     :root { color-scheme: light dark; --bg: #f7f5f2; --fg: #1c1b19; --muted: #6f6b65; }
     @media (prefers-color-scheme: dark) { :root { --bg: #161513; --fg: #f2efea; --muted: #a09b93; } }
     * { box-sizing: border-box; margin: 0; }
-    body {
-      min-height: 100svh; display: grid; place-content: center; gap: .75rem;
-      padding: 1.5rem; text-align: center; background: var(--bg); color: var(--fg);
-      font-family: Georgia, "Times New Roman", serif;
-    }
+    body { min-height: 100svh; background: var(--bg); color: var(--fg); font-family: Georgia, "Times New Roman", serif; }
+    main { width: min(100%, 72rem); margin: 0 auto; padding: clamp(3rem, 10vh, 6rem) 1rem 4rem; }
+    header { text-align: center; }
     h1 { font-size: clamp(2rem, 7vw, 3.5rem); font-weight: 400; letter-spacing: .01em; }
-    p { color: var(--muted); font-size: .85rem; letter-spacing: .28em; text-transform: uppercase; }
-    img { display: block; width: min(90vw, 56rem); max-height: 70svh; object-fit: contain; margin: 0 auto 1rem; }
-    img[hidden] { display: none; }
+    .tagline { margin-top: .5rem; color: var(--muted); font-size: .85rem; letter-spacing: .28em; text-transform: uppercase; }
+    nav { display: flex; flex-wrap: wrap; justify-content: center; gap: .5rem 1.5rem; margin-top: 1.25rem; }
+    nav:empty { display: none; }
+    a { color: inherit; }
+    section { margin-top: 3.5rem; }
+    h2 { margin-bottom: 1rem; font-size: 1.4rem; font-weight: 400; overflow-wrap: anywhere; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 18rem), 1fr)); gap: 1rem; }
+    .grid img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: color-mix(in srgb, var(--fg) 8%, transparent); }
   </style>
 </head>
 <body>
-  <img src="/image" alt="Photograph by Ayelet Cohen" onerror="this.hidden = true">
-  <h1>Ayelet Cohen</h1>
-  <p>Photography</p>
+  <main>
+    <header>
+      <h1>Ayelet Cohen</h1>
+      <p class="tagline">Photography</p>
+      <nav id="contact"></nav>
+    </header>
+    <div id="albums"></div>
+  </main>
+  <script>
+    async function showSite() {
+      const response = await fetch("/api/site", { cache: "no-store" });
+      if (!response.ok) return;
+      const site = await response.json();
+
+      const contact = document.getElementById("contact");
+      if (site.phone) {
+        const phone = document.createElement("a");
+        phone.href = "tel:" + site.phone.replace(/[^+0-9]/g, "");
+        phone.textContent = site.phone;
+        contact.append(phone);
+      }
+      if (site.instagram) {
+        const instagram = document.createElement("a");
+        instagram.href = site.instagram;
+        instagram.rel = "noopener";
+        instagram.textContent = "Instagram";
+        contact.append(instagram);
+      }
+
+      const albums = document.getElementById("albums");
+      for (const album of site.albums) {
+        if (album.photos.length === 0) continue;
+        const section = document.createElement("section");
+        const title = document.createElement("h2");
+        title.textContent = album.name;
+        const grid = document.createElement("div");
+        grid.className = "grid";
+        for (const id of album.photos) {
+          const link = document.createElement("a");
+          link.href = "/photos/" + id;
+          const image = document.createElement("img");
+          image.src = link.href;
+          image.alt = "Photograph from " + album.name;
+          image.loading = "lazy";
+          link.append(image);
+          grid.append(link);
+        }
+        section.append(title, grid);
+        albums.append(section);
+      }
+    }
+    showSite().catch(() => {});
+  </script>
 </body>
 </html>

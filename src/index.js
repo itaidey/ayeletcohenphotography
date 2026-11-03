@@ -1,8 +1,11 @@
-// Public: GET /image serves the current photo (the homepage displays it).
-// Private: /upload is behind Cloudflare Access. This Worker also verifies the
+import { configPage } from "./config-page.js";
+
+// Public: /api/site and /photos/<id> supply the homepage.
+// Private: /config is behind Cloudflare Access. This Worker also verifies the
 // Access token itself and refuses requests when Access is not configured.
 
-const IMAGE_KEY = "current-image";
+const SITE_KEY = "site.json";
+const LEGACY_IMAGE_KEY = "current-image";
 const MAIN_HOST = "ayeletcohenphotography.com";
 const WWW_HOST = `www.${MAIN_HOST}`;
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -81,14 +84,84 @@ function detectImageType(bytes) {
   return null;
 }
 
-async function serveImage(request, env) {
-  const object = await env.IMAGES.get(IMAGE_KEY);
-  if (!object) return text("No image yet", 404);
+const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const PHOTO_ROUTE = new RegExp(`^/photos/(${UUID_PATTERN})$`);
+const API_ALBUM_ROUTE = new RegExp(`^/config/api/albums/(${UUID_PATTERN})$`);
+const API_ALBUM_PHOTOS_ROUTE = new RegExp(`^/config/api/albums/(${UUID_PATTERN})/photos$`);
+const API_PHOTO_ROUTE = new RegExp(`^/config/api/photos/(${UUID_PATTERN})$`);
+
+const json = (value, status = 200) =>
+  new Response(JSON.stringify(value), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
+  });
+
+const photoKey = (id) => `photos/${id}`;
+
+async function saveSite(env, site) {
+  await env.IMAGES.put(SITE_KEY, JSON.stringify(site), {
+    httpMetadata: { contentType: "application/json" },
+  });
+}
+
+async function loadSite(env) {
+  const stored = await env.IMAGES.get(SITE_KEY);
+  if (stored) return stored.json();
+
+  const site = { phone: "", instagram: "", albums: [] };
+  const legacy = await env.IMAGES.get(LEGACY_IMAGE_KEY);
+  if (legacy) {
+    const photoId = crypto.randomUUID();
+    await env.IMAGES.put(photoKey(photoId), await legacy.arrayBuffer(), {
+      httpMetadata: legacy.httpMetadata,
+    });
+    site.albums.push({ id: crypto.randomUUID(), name: "Photos", photos: [photoId] });
+    await saveSite(env, site);
+    await env.IMAGES.delete(LEGACY_IMAGE_KEY);
+  }
+  return site;
+}
+
+function normalizePhone(value) {
+  const phone = String(value ?? "").trim();
+  if (phone === "") return "";
+  return /^\+?[0-9][0-9\s()-]{5,24}$/.test(phone) ? phone : null;
+}
+
+function normalizeInstagram(value) {
+  const input = String(value ?? "").trim();
+  if (input === "") return "";
+
+  let handle = input.replace(/^@/, "");
+  if (input.includes("/")) {
+    let url;
+    try {
+      url = new URL(input.includes("://") ? input : `https://${input}`);
+    } catch {
+      return null;
+    }
+    if (!["instagram.com", "www.instagram.com"].includes(url.hostname.toLowerCase())) return null;
+    handle = url.pathname.split("/").filter(Boolean)[0] ?? "";
+  }
+  return /^[A-Za-z0-9._]{1,30}$/.test(handle) ? `https://www.instagram.com/${handle}/` : null;
+}
+
+async function readJson(request) {
+  try {
+    return await request.json();
+  } catch {
+    return null;
+  }
+}
+
+async function servePhoto(request, env, id) {
+  const object = await env.IMAGES.get(photoKey(id));
+  if (!object) return text("Not found", 404);
 
   const headers = new Headers();
   headers.set("Content-Type", object.httpMetadata?.contentType ?? "application/octet-stream");
   headers.set("ETag", object.httpEtag);
-  headers.set("Cache-Control", "public, max-age=0, must-revalidate");
+  headers.set("Cache-Control", "public, max-age=3600");
   headers.set("X-Content-Type-Options", "nosniff");
   if (request.headers.get("If-None-Match") === object.httpEtag) {
     return new Response(null, { status: 304, headers });
@@ -96,99 +169,133 @@ async function serveImage(request, env) {
   return new Response(request.method === "HEAD" ? null : object.body, { headers });
 }
 
-async function handleUpload(request, env) {
-  if (request.headers.get("Origin") !== new URL(request.url).origin) {
-    return text("Upload refused", 403);
-  }
+async function updateProfile(request, env) {
+  const input = await readJson(request);
+  if (!input) return text("Invalid request", 400);
+  const phone = normalizePhone(input.phone);
+  if (phone === null) return text("Enter a valid phone number", 400);
+  const instagram = normalizeInstagram(input.instagram);
+  if (instagram === null) return text("Enter an Instagram username or instagram.com link", 400);
+
+  const site = await loadSite(env);
+  site.phone = phone;
+  site.instagram = instagram;
+  await saveSite(env, site);
+  return json(site);
+}
+
+async function createAlbum(request, env) {
+  const input = await readJson(request);
+  const name = String(input?.name ?? "").trim();
+  if (name === "" || name.length > 60) return text("Album name must be 1 to 60 characters", 400);
+
+  const site = await loadSite(env);
+  site.albums.push({ id: crypto.randomUUID(), name, photos: [] });
+  await saveSite(env, site);
+  return json(site, 201);
+}
+
+async function deleteAlbum(env, albumId) {
+  const site = await loadSite(env);
+  const album = site.albums.find((item) => item.id === albumId);
+  if (!album) return text("Album not found", 404);
+
+  site.albums = site.albums.filter((item) => item.id !== albumId);
+  await saveSite(env, site);
+  await Promise.all(album.photos.map((id) => env.IMAGES.delete(photoKey(id))));
+  return json(site);
+}
+
+async function addPhoto(request, env, albumId) {
   const declaredSize = Number(request.headers.get("Content-Length") ?? 0);
-  if (declaredSize > MAX_BYTES) return text("Image is larger than 20 MB", 413);
+  if (declaredSize > MAX_BYTES) return text("Photo is larger than 20 MB", 413);
 
   const body = new Uint8Array(await request.arrayBuffer());
-  if (body.length === 0) return text("No image received", 400);
-  if (body.length > MAX_BYTES) return text("Image is larger than 20 MB", 413);
+  if (body.length === 0) return text("No photo received", 400);
+  if (body.length > MAX_BYTES) return text("Photo is larger than 20 MB", 413);
 
   const contentType = detectImageType(body);
   if (!contentType) return text("Use a JPEG, PNG, WebP or GIF image", 415);
 
-  await env.IMAGES.put(IMAGE_KEY, body, { httpMetadata: { contentType } });
-  return text("Uploaded", 200);
+  const site = await loadSite(env);
+  const album = site.albums.find((item) => item.id === albumId);
+  if (!album) return text("Album not found", 404);
+
+  const photoId = crypto.randomUUID();
+  await env.IMAGES.put(photoKey(photoId), body, { httpMetadata: { contentType } });
+  album.photos.push(photoId);
+  await saveSite(env, site);
+  return json(site, 201);
 }
 
-const uploadPage = (email) => `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Upload Image</title>
-  <style>
-    :root { color-scheme: light dark; --bg: #f7f5f2; --fg: #1c1b19; --muted: #6f6b65; }
-    @media (prefers-color-scheme: dark) { :root { --bg: #161513; --fg: #f2efea; --muted: #a09b93; } }
-    * { box-sizing: border-box; margin: 0; }
-    body { min-height: 100svh; display: grid; place-content: center; gap: 1rem; padding: 1.5rem;
-      background: var(--bg); color: var(--fg); font-family: Georgia, "Times New Roman", serif; text-align: center; }
-    h1 { font-weight: 400; }
-    p { color: var(--muted); overflow-wrap: anywhere; }
-    input, button { font: inherit; max-width: 100%; }
-    button { padding: .6rem 1.2rem; cursor: pointer; }
-  </style>
-</head>
-<body>
-  <h1>Upload image</h1>
-  <p>Signed in as ${escapeHtml(email)}. A new upload replaces the photo on the homepage.</p>
-  <form id="form">
-    <p><input id="file" type="file" accept="image/jpeg,image/png,image/webp,image/gif" required></p>
-    <p><button type="submit">Upload</button></p>
-  </form>
-  <p id="status" role="status"></p>
-  <script>
-    const form = document.getElementById("form");
-    const status = document.getElementById("status");
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const file = document.getElementById("file").files[0];
-      if (!file) return;
-      status.textContent = "Uploading...";
-      try {
-        const response = await fetch("/upload", { method: "POST", body: file });
-        if (response.ok) {
-          status.innerHTML = 'Uploaded. <a href="/">View the homepage</a>';
-          form.reset();
-        } else {
-          status.textContent = await response.text();
-        }
-      } catch {
-        status.textContent = "Upload failed. Check your connection and try again.";
-      }
-    });
-  </script>
-</body>
-</html>`;
+async function deletePhoto(env, photoId) {
+  const site = await loadSite(env);
+  const album = site.albums.find((item) => item.photos.includes(photoId));
+  if (!album) return text("Photo not found", 404);
 
-function escapeHtml(value) {
-  return String(value).replace(
-    /[&<>"']/g,
-    (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char],
-  );
+  album.photos = album.photos.filter((id) => id !== photoId);
+  await saveSite(env, site);
+  await env.IMAGES.delete(photoKey(photoId));
+  return json(site);
+}
+
+async function handleConfig(request, env, identity, pathname) {
+  const { method } = request;
+  if (pathname === "/config") {
+    if (method !== "GET") return text("Method not allowed", 405);
+    return new Response(configPage(identity.email), {
+      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+    });
+  }
+
+  if (method !== "GET" && request.headers.get("Origin") !== new URL(request.url).origin) {
+    return text("Request refused", 403);
+  }
+
+  if (pathname === "/config/api/profile" && method === "PUT") return updateProfile(request, env);
+  if (pathname === "/config/api/albums" && method === "POST") return createAlbum(request, env);
+
+  const albumMatch = pathname.match(API_ALBUM_ROUTE);
+  if (albumMatch && method === "DELETE") return deleteAlbum(env, albumMatch[1]);
+
+  const albumPhotosMatch = pathname.match(API_ALBUM_PHOTOS_ROUTE);
+  if (albumPhotosMatch && method === "POST") return addPhoto(request, env, albumPhotosMatch[1]);
+
+  const photoMatch = pathname.match(API_PHOTO_ROUTE);
+  if (photoMatch && method === "DELETE") return deletePhoto(env, photoMatch[1]);
+
+  return text("Not found", 404);
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const { pathname } = url;
+    const readOnly = request.method === "GET" || request.method === "HEAD";
 
-    if (pathname === "/image") {
-      if (request.method !== "GET" && request.method !== "HEAD") return text("Method not allowed", 405);
-      return serveImage(request, env);
+    if (pathname === "/api/site") {
+      if (!readOnly) return text("Method not allowed", 405);
+      return json(await loadSite(env));
     }
 
-    if (pathname !== "/upload" && !pathname.startsWith("/upload/")) return text("Not found", 404);
+    const photoMatch = pathname.match(PHOTO_ROUTE);
+    if (photoMatch) {
+      if (!readOnly) return text("Method not allowed", 405);
+      return servePhoto(request, env, photoMatch[1]);
+    }
+
+    if (pathname === "/upload" || pathname.startsWith("/upload/")) {
+      return Response.redirect(`https://${MAIN_HOST}/config`, 302);
+    }
+
+    if (pathname !== "/config" && !pathname.startsWith("/config/")) return text("Not found", 404);
 
     // Access protects the main domain, so sign-in always happens there.
     if (url.hostname === WWW_HOST) {
       return Response.redirect(`https://${MAIN_HOST}${pathname}`, 302);
     }
 
-    if (!env.TEAM_DOMAIN || !env.POLICY_AUD) return text("Upload is not configured", 403);
+    if (!env.TEAM_DOMAIN || !env.POLICY_AUD) return text("Config is not available", 403);
     const token = request.headers.get("Cf-Access-Jwt-Assertion");
     if (!token) return text("Sign-in required", 403);
 
@@ -199,13 +306,6 @@ export default {
       return text("Sign-in required", 403);
     }
 
-    if (pathname !== "/upload") return text("Not found", 404);
-    if (request.method === "GET") {
-      return new Response(uploadPage(identity.email), {
-        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
-      });
-    }
-    if (request.method === "POST") return handleUpload(request, env);
-    return text("Method not allowed", 405);
+    return handleConfig(request, env, identity, pathname);
   },
 };

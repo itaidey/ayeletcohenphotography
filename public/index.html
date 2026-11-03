@@ -14,8 +14,8 @@
     header { text-align: center; }
     h1 { font-size: clamp(2rem, 7vw, 3.5rem); font-weight: 400; letter-spacing: .01em; }
     .tagline { margin-top: .5rem; color: var(--muted); font-size: .85rem; letter-spacing: .28em; text-transform: uppercase; }
-    nav { display: flex; flex-wrap: wrap; justify-content: center; gap: .5rem 1.5rem; margin-top: 1.25rem; }
-    nav:empty { display: none; }
+    footer { display: flex; flex-wrap: wrap; justify-content: center; gap: .5rem 1.5rem; margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid color-mix(in srgb, var(--fg) 15%, transparent); }
+    footer:empty { display: none; }
     a { color: inherit; }
     section { margin-top: 3.5rem; }
     h2 { margin-bottom: 1rem; font-size: 1.4rem; font-weight: 400; overflow-wrap: anywhere; }
@@ -28,11 +28,18 @@
     <header>
       <h1>Ayelet Cohen</h1>
       <p class="tagline">Photography</p>
-      <nav id="contact"></nav>
     </header>
     <div id="albums"></div>
+    <footer id="contact"></footer>
   </main>
   <script>
+    // WhatsApp needs an international number. Local Israeli numbers start with 0.
+    function whatsappLink(phone) {
+      const digits = phone.replace(/[^0-9]/g, "");
+      const international = phone.trim().startsWith("+") ? digits : digits.replace(/^0/, "972");
+      return "https://wa.me/" + international;
+    }
+
     async function showSite() {
       const response = await fetch("/api/site", { cache: "no-store" });
       if (!response.ok) return;
@@ -41,7 +48,8 @@
       const contact = document.getElementById("contact");
       if (site.phone) {
         const phone = document.createElement("a");
-        phone.href = "tel:" + site.phone.replace(/[^+0-9]/g, "");
+        phone.href = whatsappLink(site.phone);
+        phone.rel = "noopener";
         phone.textContent = site.phone;
         contact.append(phone);
       }

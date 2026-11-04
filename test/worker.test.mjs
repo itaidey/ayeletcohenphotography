@@ -57,12 +57,15 @@ async function api(e, method, path, body, { auth, origin = SITE, headers = {} } 
   }), e);
 }
 const get = (path, e, t) => worker.fetch(new Request(`${SITE}${path}`, { headers: t ? { "Cf-Access-Jwt-Assertion": t } : {} }), e);
-const publicSite = async (e) => (await get("/api/site", e)).json();
-async function albumWithPhoto(e) {
-  const created = await (await api(e, "POST", "/config/api/albums", { name: "Weddings" })).json();
-  const album = created.albums.at(-1);
-  const updated = await (await api(e, "POST", `/config/api/albums/${album.id}/photos`, png)).json();
-  return { albumId: album.id, photoId: updated.albums.at(-1).photos[0] };
+const getSite = async (e) => (await get("/config/api/site", e, await token())).json();
+const html = async (path, e) => (await get(path, e)).text();
+const contact = (e, fields, path = "/contact") => worker.fetch(new Request(`${SITE}${path}`, {
+  method: "POST",
+  body: new URLSearchParams({ started: String(Date.now() - 10000), ...fields }),
+  redirect: "manual",
+}), e);
+async function addPhoto(e, slug = "family") {
+  return (await (await api(e, "POST", `/config/api/services/${slug}/photos`, png)).json()).photoId;
 }
 
 test("config page needs a valid token and escapes the email", async () => {
@@ -70,7 +73,9 @@ test("config page needs a valid token and escapes the email", async () => {
   assert.equal((await get("/config", e)).status, 403);
   const ok = await get("/config", e, await token({ email: "<b>@x" }));
   assert.equal(ok.status, 200);
-  assert.doesNotMatch(await ok.text(), /<b>@x/);
+  const page = await ok.text();
+  assert.doesNotMatch(page, /<b>@x/);
+  assert.match(page, /noindex/);
 });
 for (const [name, build] of [
   ["expired", () => token({ exp: 1 })],
@@ -84,7 +89,7 @@ for (const [name, build] of [
 ]) {
   test(`rejects token: ${name}`, async () => {
     const e = env();
-    assert.equal((await api(e, "POST", "/config/api/albums", { name: "x" }, { auth: await build() })).status, 403);
+    assert.equal((await api(e, "PUT", "/config/api/settings", {}, { auth: await build() })).status, 403);
     assert.equal(e.IMAGES.items.size, 0);
   });
 }
@@ -92,98 +97,192 @@ test("every API route refuses a missing token, garbage token and missing config"
   const e = env();
   const id = crypto.randomUUID();
   for (const [method, path, body] of [
-    ["PUT", "/config/api/profile", {}],
-    ["POST", "/config/api/albums", { name: "x" }],
-    ["DELETE", `/config/api/albums/${id}`],
-    ["POST", `/config/api/albums/${id}/photos`, png],
+    ["GET", "/config/api/site"],
+    ["PUT", "/config/api/settings", {}],
+    ["PUT", "/config/api/text", {}],
+    ["PUT", "/config/api/services/family/text", {}],
+    ["POST", "/config/api/services/family/photos", png],
+    ["POST", "/config/api/slots/hero", png],
+    ["DELETE", "/config/api/slots/hero"],
+    ["PUT", `/config/api/photos/${id}/thumb`, png],
+    ["POST", `/config/api/photos/${id}/cover`],
+    ["POST", `/config/api/photos/${id}/move`, {}],
     ["DELETE", `/config/api/photos/${id}`],
   ]) {
     assert.equal((await api(e, method, path, body, { auth: null })).status, 403, path);
     assert.equal((await api(e, method, path, body, { auth: "a.b.c" })).status, 403, path);
   }
   const unset = { IMAGES: bucket(), TEAM_DOMAIN: "", POLICY_AUD: "" };
-  assert.equal((await api(unset, "POST", "/config/api/albums", { name: "x" })).status, 403);
+  assert.equal((await api(unset, "PUT", "/config/api/settings", {})).status, 403);
   assert.equal(e.IMAGES.items.size, 0);
 });
 test("cross-site writes are refused", async () => {
   const e = env();
-  assert.equal((await api(e, "POST", "/config/api/albums", { name: "x" }, { origin: "https://evil.example" })).status, 403);
+  assert.equal((await api(e, "PUT", "/config/api/settings", { phone: "" }, { origin: "https://evil.example" })).status, 403);
   assert.equal(e.IMAGES.items.size, 0);
+});
+test("the old site data moves across without losing anything", async () => {
+  const e = env();
+  const id = crypto.randomUUID();
+  await e.IMAGES.put("site.json", JSON.stringify({ phone: "054-882-3866", instagram: "https://www.instagram.com/a/", albums: [{ id: "x", name: "Photos", photos: [id] }] }));
+  const site = await getSite(e);
+  assert.equal(site.version, 2);
+  assert.equal(site.phone, "054-882-3866");
+  assert.deepEqual(site.unsorted, [id]);
+  assert.match(await html("/gallery", e), new RegExp(id));
+  assert.equal(JSON.parse(e.IMAGES.items.get("site.json").body).version, 2);
 });
 test("contact details are validated and normalized", async () => {
   const e = env();
-  const save = (phone, instagram) => api(e, "PUT", "/config/api/profile", { phone, instagram });
-  assert.equal((await save("not a phone", "")).status, 400);
-  assert.equal((await save("", "https://evil.example/x")).status, 400);
-  assert.equal((await save("", "javascript:alert(1)")).status, 400);
-  for (const input of ["ayelet.photo", "@ayelet.photo", "instagram.com/ayelet.photo", "https://www.instagram.com/ayelet.photo/?hl=he"]) {
-    assert.equal((await save("050-123-4567", input)).status, 200, input);
-    const site = await publicSite(e);
-    assert.equal(site.instagram, "https://www.instagram.com/ayelet.photo/");
-    assert.equal(site.phone, "050-123-4567");
+  const save = (fields) => api(e, "PUT", "/config/api/settings", fields);
+  assert.equal((await save({ phone: "not a phone" })).status, 400);
+  assert.equal((await save({ instagram: "https://evil.example/x" })).status, 400);
+  assert.equal((await save({ instagram: "javascript:alert(1)" })).status, 400);
+  assert.equal((await save({ facebook: "https://evil.example/x" })).status, 400);
+  assert.equal((await save({ contactEmail: "nope" })).status, 400);
+  assert.equal((await save({ phone: "050-123-4567", instagram: "@ayelet.photo", facebook: "facebook.com/ayelet", contactEmail: "a@b.co" })).status, 200);
+  const site = await getSite(e);
+  assert.equal(site.instagram, "https://www.instagram.com/ayelet.photo/");
+  assert.equal(site.facebook, "https://www.facebook.com/ayelet/");
+  const page = await html("/", e);
+  assert.match(page, /https:\/\/wa\.me\/972501234567/);
+  assert.match(page, /facebook\.com\/ayelet/);
+  assert.doesNotMatch(page, /a@b\.co/);
+  assert.equal((await get("/api/site", e)).status, 404);
+});
+test("all pages render in both languages with search tags", async () => {
+  const e = env();
+  for (const route of ["", "/about", "/services", "/gallery", "/contact", "/services/weddings", "/services/business"]) {
+    const he = await get(route || "/", e);
+    assert.equal(he.status, 200, route);
+    assert.match(he.headers.get("Content-Security-Policy"), /script-src 'none'/);
+    const hebrew = await he.text();
+    assert.match(hebrew, /<html lang="he" dir="rtl">/);
+    assert.match(hebrew, /hreflang="en"/);
+    const english = await html(`/en${route}`, e);
+    assert.match(english, /<html lang="en" dir="ltr">/);
+    assert.match(english, /rel="canonical"/);
   }
-  assert.equal((await save("", "")).status, 200);
-  assert.equal((await publicSite(e)).phone, "");
+  assert.match(await html("/services/newborn", e), /צילומי ניו בורן/);
+  assert.match(await html("/en/services/newborn", e), /Newborn photography/);
+  assert.equal((await get("/services/unknown", e)).status, 404);
+  assert.equal((await get("/en/nothing", e)).status, 404);
+  assert.doesNotMatch(await html("/en/services", e), /₪|NIS|price/i);
 });
-test("album names are validated", async () => {
+test("saved text replaces the defaults and is escaped", async () => {
   const e = env();
-  assert.equal((await api(e, "POST", "/config/api/albums", { name: "  " })).status, 400);
-  assert.equal((await api(e, "POST", "/config/api/albums", { name: "x".repeat(61) })).status, 400);
-  assert.equal((await api(e, "POST", "/config/api/albums", "not json")).status, 400);
+  await api(e, "PUT", "/config/api/text", { he: { heroTitle: "<script>x</script>" }, en: { about: "First\n\nSecond" } });
+  assert.doesNotMatch(await html("/", e), /<script>x/);
+  assert.match(await html("/en/about", e), /<p>First<\/p><p>Second<\/p>/);
+  await api(e, "PUT", "/config/api/services/family/text", { he: "טקסט שלי", en: "" });
+  assert.match(await html("/services/family", e), /טקסט שלי/);
+  assert.match(await html("/en/services/family", e), /Relaxed, natural/);
+  assert.equal((await api(e, "PUT", "/config/api/text", { he: { about: "x".repeat(5001) } })).status, 400);
 });
-test("photos are checked before storing", async () => {
+test("photos are checked before storing and unknown services are refused", async () => {
   const e = env();
-  const { albumId } = await albumWithPhoto(e);
-  const add = (body) => api(e, "POST", `/config/api/albums/${albumId}/photos`, body);
+  const add = (body) => api(e, "POST", "/config/api/services/family/photos", body);
   assert.equal((await add(new TextEncoder().encode("<svg onload=alert(1)>"))).status, 415);
   assert.equal((await add(new Uint8Array(0))).status, 400);
   assert.equal((await add(new Uint8Array(20 * 1024 * 1024 + 1))).status, 413);
-  assert.equal((await api(e, "POST", `/config/api/albums/${crypto.randomUUID()}/photos`, png)).status, 404);
-  assert.equal((await publicSite(e)).albums[0].photos.length, 1);
+  assert.equal((await api(e, "POST", "/config/api/services/nope/photos", png)).status, 404);
+  assert.equal(e.IMAGES.items.size, 0);
 });
-test("uploaded photos are public with safe headers and revalidate", async () => {
+test("photos show on pages, with thumbnails and safe headers", async () => {
   const e = env();
-  const { photoId } = await albumWithPhoto(e);
-  const r = await get(`/photos/${photoId}`, e);
-  assert.equal(r.status, 200);
-  assert.equal(r.headers.get("Content-Type"), "image/png");
-  assert.equal(r.headers.get("X-Content-Type-Options"), "nosniff");
-  const again = await worker.fetch(new Request(`${SITE}/photos/${photoId}`, { headers: { "If-None-Match": '"e1"' } }), e);
+  const id = await addPhoto(e, "weddings");
+  assert.match(await html("/services/weddings", e), new RegExp(`/photos/${id}/thumb`));
+  assert.match(await html("/gallery", e), new RegExp(id));
+  assert.match(await html("/", e), new RegExp(id));
+  const fallback = await get(`/photos/${id}/thumb`, e);
+  assert.equal(fallback.status, 200);
+  assert.equal(fallback.headers.get("X-Content-Type-Options"), "nosniff");
+  assert.equal((await api(e, "PUT", `/config/api/photos/${id}/thumb`, png)).status, 200);
+  assert.equal(e.IMAGES.items.has(`photos/${id}/thumb`), true);
+  const again = await worker.fetch(new Request(`${SITE}/photos/${id}`, { headers: { "If-None-Match": '"e1"' } }), e);
   assert.equal(again.status, 304);
-  assert.equal((await worker.fetch(new Request(`${SITE}/photos/${photoId}`, { method: "POST", body: png }), e)).status, 405);
-  assert.equal((await worker.fetch(new Request(`${SITE}/api/site`, { method: "POST", body: "{}" }), e)).status, 405);
+  assert.equal((await worker.fetch(new Request(`${SITE}/photos/${id}`, { method: "POST", body: png }), e)).status, 405);
   assert.equal((await get("/photos/site.json", e)).status, 404);
+  assert.equal((await api(e, "PUT", `/config/api/photos/${crypto.randomUUID()}/thumb`, png)).status, 404);
 });
-test("deleting a photo removes it from the site and storage", async () => {
+test("cover, move and delete keep the site and storage in step", async () => {
   const e = env();
-  const { photoId } = await albumWithPhoto(e);
-  assert.equal((await api(e, "DELETE", `/config/api/photos/${photoId}`)).status, 200);
-  assert.deepEqual((await publicSite(e)).albums[0].photos, []);
-  assert.equal(e.IMAGES.items.has(`photos/${photoId}`), false);
-  assert.equal((await get(`/photos/${photoId}`, e)).status, 404);
-  assert.equal((await api(e, "DELETE", `/config/api/photos/${photoId}`)).status, 404);
+  const first = await addPhoto(e);
+  const second = await addPhoto(e);
+  await api(e, "PUT", `/config/api/photos/${second}/thumb`, png);
+  await api(e, "POST", `/config/api/photos/${second}/cover`);
+  assert.deepEqual((await getSite(e)).services.family.photos, [second, first]);
+  assert.equal((await api(e, "POST", `/config/api/photos/${first}/move`, { service: "nope" })).status, 400);
+  await api(e, "POST", `/config/api/photos/${first}/move`, { service: "events" });
+  let site = await getSite(e);
+  assert.deepEqual(site.services.family.photos, [second]);
+  assert.deepEqual(site.services.events.photos, [first]);
+  assert.equal((await api(e, "DELETE", `/config/api/photos/${second}`)).status, 200);
+  assert.equal(e.IMAGES.items.has(`photos/${second}`), false);
+  assert.equal(e.IMAGES.items.has(`photos/${second}/thumb`), false);
+  assert.equal((await get(`/photos/${second}`, e)).status, 404);
+  assert.equal((await api(e, "DELETE", `/config/api/photos/${second}`)).status, 404);
 });
-test("deleting an album removes its photos only", async () => {
+test("homepage and portrait photos replace and delete their old files", async () => {
   const e = env();
-  const first = await albumWithPhoto(e);
-  const second = await albumWithPhoto(e);
-  assert.equal((await api(e, "DELETE", `/config/api/albums/${first.albumId}`)).status, 200);
-  const site = await publicSite(e);
-  assert.deepEqual(site.albums.map((a) => a.id), [second.albumId]);
-  assert.equal(e.IMAGES.items.has(`photos/${first.photoId}`), false);
-  assert.equal(e.IMAGES.items.has(`photos/${second.photoId}`), true);
+  const first = (await (await api(e, "POST", "/config/api/slots/hero", png)).json()).photoId;
+  const second = (await (await api(e, "POST", "/config/api/slots/hero", png)).json()).photoId;
+  assert.equal(e.IMAGES.items.has(`photos/${first}`), false);
+  assert.match(await html("/", e), new RegExp(`/photos/${second}`));
+  assert.equal((await api(e, "PUT", `/config/api/photos/${second}/thumb`, png)).status, 200);
+  await api(e, "DELETE", "/config/api/slots/hero");
+  assert.equal(e.IMAGES.items.has(`photos/${second}`), false);
+  assert.equal((await getSite(e)).heroPhoto, null);
 });
-test("the existing uploaded photo moves into a Photos album", async () => {
-  const e = env();
-  await e.IMAGES.put("current-image", png, { httpMetadata: { contentType: "image/png" } });
-  const site = await publicSite(e);
-  assert.equal(site.albums[0].name, "Photos");
-  const id = site.albums[0].photos[0];
-  assert.equal((await get(`/photos/${id}`, e)).headers.get("Content-Type"), "image/png");
-  assert.equal(e.IMAGES.items.has("current-image"), false);
-  assert.deepEqual((await publicSite(e)).albums[0].photos, [id]);
+function mail() {
+  const sent = [];
+  return { sent, async send(message) { sent.push(message); return { messageId: "1" }; } };
+}
+async function contactEnv() {
+  const e = { ...env(), EMAIL: mail() };
+  await api(e, "PUT", "/config/api/settings", { contactEmail: "owner@example.com" });
+  return e;
+}
+test("the contact form emails the saved address", async () => {
+  const e = await contactEnv();
+  const r = await contact(e, { name: "Dana\r\nBcc: x@y.z", phone: "0501234567", email: "d@e.co", service: "newborn", message: "שלום" });
+  assert.equal(r.status, 303);
+  assert.equal(r.headers.get("Location"), "/contact?sent=1#form");
+  assert.equal(e.EMAIL.sent.length, 1);
+  const [message] = e.EMAIL.sent;
+  assert.equal(message.to, "owner@example.com");
+  assert.equal(message.from.email, "website@ayeletcohenphotography.com");
+  assert.equal(message.replyTo, "d@e.co");
+  assert.doesNotMatch(message.subject, /[\r\n]/);
+  assert.match(message.text, /ניו בורן/);
+  assert.match(await html("/contact?sent=1", e), /ההודעה נשלחה/);
 });
-test("old upload links and www go to config on the main domain", async () => {
+test("the contact form validates input and traps bots", async () => {
+  const e = await contactEnv();
+  assert.match((await contact(e, { name: "a", message: "b" })).headers.get("Location"), /error=missing/);
+  assert.match((await contact(e, { name: "a", email: "bad", message: "b" })).headers.get("Location"), /error=email/);
+  assert.match((await contact(e, { name: "a", phone: "1", message: "b", website: "x" })).headers.get("Location"), /sent=1/);
+  assert.match((await contact(e, { name: "a", phone: "1", message: "b", started: String(Date.now()) })).headers.get("Location"), /sent=1/);
+  assert.equal(e.EMAIL.sent.length, 0);
+  assert.match((await contact(e, { name: "a", message: "b" }, "/en/contact")).headers.get("Location"), /^\/en\/contact/);
+});
+test("the contact form reports a failure when email cannot be sent", async () => {
+  const noAddress = { ...env(), EMAIL: mail() };
+  assert.match((await contact(noAddress, { name: "a", phone: "1", message: "b" })).headers.get("Location"), /error=send/);
+  const e = await contactEnv();
+  e.EMAIL = { async send() { throw new Error("no"); } };
+  assert.match((await contact(e, { name: "a", phone: "1", message: "b" })).headers.get("Location"), /error=send/);
+  const noBinding = await contactEnv();
+  delete noBinding.EMAIL;
+  assert.match((await contact(noBinding, { name: "a", phone: "1", message: "b" })).headers.get("Location"), /error=send/);
+});
+test("the contact form stops after the daily limit", async () => {
+  const e = await contactEnv();
+  await e.IMAGES.put(`contact-count/${new Date().toISOString().slice(0, 10)}`, JSON.stringify({ count: 50 }));
+  assert.match((await contact(e, { name: "a", phone: "1", message: "b" })).headers.get("Location"), /error=send/);
+  assert.equal(e.EMAIL.sent.length, 0);
+});
+test("old links, www and robots behave", async () => {
   const e = env();
   for (const [from, to] of [
     [`${SITE}/upload`, `${SITE}/config`],
@@ -194,16 +293,17 @@ test("old upload links and www go to config on the main domain", async () => {
     assert.equal(r.status, 302);
     assert.equal(r.headers.get("Location"), to);
   }
-  const write = new Request(`${WWW}/config/api/albums`, { method: "POST", body: "{}", redirect: "manual" });
+  const write = new Request(`${WWW}/config/api/settings`, { method: "PUT", body: "{}", redirect: "manual" });
   assert.equal((await worker.fetch(write, e)).status, 302);
   assert.equal(e.IMAGES.items.size, 0);
-  assert.equal((await worker.fetch(new Request(`${WWW}/api/site`), e)).status, 200);
-});
-test("unknown routes stay closed", async () => {
-  const e = env();
+  assert.match(await (await worker.fetch(new Request(`${WWW}/about`), e)).text(), /rel="canonical" href="https:\/\/ayeletcohenphotography\.com\/about"/);
+  assert.match(await html("/robots.txt", e), /Disallow: \/config/);
+  const map = await html("/sitemap.xml", e);
+  assert.match(map, /\/en\/services\/weddings/);
+  assert.doesNotMatch(map, /config/);
+  assert.equal((await worker.fetch(new Request(`${SITE}/about`, { method: "POST" }), e)).status, 405);
   assert.equal((await get("/config/other", e)).status, 403);
   assert.equal((await get("/config/other", e, await token())).status, 404);
-  assert.equal((await get("/image", e)).status, 404);
 });
 test("certificates are cached", async () => {
   const e = env();

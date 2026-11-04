@@ -1,11 +1,12 @@
+import { SERVICES, COPY } from "./content.js";
 import { configPage } from "./config-page.js";
+import { renderPage, renderSitemap } from "./render.js";
 
-// Public: /api/site and /photos/<id> supply the homepage.
+// Public pages are rendered here from site.json in Hebrew and English.
 // Private: /config is behind Cloudflare Access. This Worker also verifies the
 // Access token itself and refuses requests when Access is not configured.
 
 const SITE_KEY = "site.json";
-const LEGACY_IMAGE_KEY = "current-image";
 const MAIN_HOST = "ayeletcohenphotography.com";
 const WWW_HOST = `www.${MAIN_HOST}`;
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -85,10 +86,24 @@ function detectImageType(bytes) {
 }
 
 const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-const PHOTO_ROUTE = new RegExp(`^/photos/(${UUID_PATTERN})$`);
-const API_ALBUM_ROUTE = new RegExp(`^/config/api/albums/(${UUID_PATTERN})$`);
-const API_ALBUM_PHOTOS_ROUTE = new RegExp(`^/config/api/albums/(${UUID_PATTERN})/photos$`);
-const API_PHOTO_ROUTE = new RegExp(`^/config/api/photos/(${UUID_PATTERN})$`);
+const PHOTO_ROUTE = new RegExp(`^/photos/(${UUID_PATTERN})(/thumb)?$`);
+const API_PHOTO_ROUTE = new RegExp(`^/config/api/photos/(${UUID_PATTERN})(?:/(thumb|cover|move))?$`);
+const SLOTS = { hero: "heroPhoto", portrait: "portraitPhoto" };
+const SLUGS = SERVICES.map((service) => service.slug);
+const TEXT_KEYS = Object.keys(COPY.he.defaults);
+const MAX_TEXT = 5000;
+const CONTACT_FROM = `website@${MAIN_HOST}`;
+const MAX_MESSAGES_PER_DAY = 50;
+const SECURITY_POLICY = [
+  "default-src 'self'",
+  "style-src 'self' https://fonts.googleapis.com",
+  "font-src https://fonts.gstatic.com",
+  "img-src 'self'",
+  "script-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
 
 const json = (value, status = 200) =>
   new Response(JSON.stringify(value), {
@@ -97,6 +112,22 @@ const json = (value, status = 200) =>
   });
 
 const photoKey = (id) => `photos/${id}`;
+const thumbKey = (id) => `photos/${id}/thumb`;
+
+function emptySite() {
+  return {
+    version: 2,
+    phone: "",
+    instagram: "",
+    facebook: "",
+    contactEmail: "",
+    heroPhoto: null,
+    portraitPhoto: null,
+    text: { he: {}, en: {} },
+    services: Object.fromEntries(SLUGS.map((slug) => [slug, { photos: [], text: { he: "", en: "" } }])),
+    unsorted: [],
+  };
+}
 
 async function saveSite(env, site) {
   await env.IMAGES.put(SITE_KEY, JSON.stringify(site), {
@@ -106,19 +137,16 @@ async function saveSite(env, site) {
 
 async function loadSite(env) {
   const stored = await env.IMAGES.get(SITE_KEY);
-  if (stored) return stored.json();
+  if (!stored) return emptySite();
+  const data = await stored.json();
+  if (data.version === 2) return data;
 
-  const site = { phone: "", instagram: "", albums: [] };
-  const legacy = await env.IMAGES.get(LEGACY_IMAGE_KEY);
-  if (legacy) {
-    const photoId = crypto.randomUUID();
-    await env.IMAGES.put(photoKey(photoId), await legacy.arrayBuffer(), {
-      httpMetadata: legacy.httpMetadata,
-    });
-    site.albums.push({ id: crypto.randomUUID(), name: "Photos", photos: [photoId] });
-    await saveSite(env, site);
-    await env.IMAGES.delete(LEGACY_IMAGE_KEY);
-  }
+  // Earlier sites kept photos in free-form albums. Keep them for sorting in /config.
+  const site = emptySite();
+  site.phone = data.phone ?? "";
+  site.instagram = data.instagram ?? "";
+  site.unsorted = (data.albums ?? []).flatMap((album) => album.photos);
+  await saveSite(env, site);
   return site;
 }
 
@@ -128,7 +156,7 @@ function normalizePhone(value) {
   return /^\+?[0-9][0-9\s()-]{5,24}$/.test(phone) ? phone : null;
 }
 
-function normalizeInstagram(value) {
+function normalizeSocial(value, domain) {
   const input = String(value ?? "").trim();
   if (input === "") return "";
 
@@ -140,10 +168,17 @@ function normalizeInstagram(value) {
     } catch {
       return null;
     }
-    if (!["instagram.com", "www.instagram.com"].includes(url.hostname.toLowerCase())) return null;
+    const host = url.hostname.toLowerCase().replace(/^(www|m)\./, "");
+    if (host !== domain) return null;
     handle = url.pathname.split("/").filter(Boolean)[0] ?? "";
   }
-  return /^[A-Za-z0-9._]{1,30}$/.test(handle) ? `https://www.instagram.com/${handle}/` : null;
+  return /^[A-Za-z0-9._-]{1,60}$/.test(handle) ? `https://www.${domain}/${handle}/` : null;
+}
+
+function normalizeEmail(value) {
+  const email = String(value ?? "").trim();
+  if (email === "") return "";
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254 ? email : null;
 }
 
 async function readJson(request) {
@@ -154,8 +189,8 @@ async function readJson(request) {
   }
 }
 
-async function servePhoto(request, env, id) {
-  const object = await env.IMAGES.get(photoKey(id));
+async function servePhoto(request, env, id, thumb) {
+  const object = (thumb && (await env.IMAGES.get(thumbKey(id)))) || (await env.IMAGES.get(photoKey(id)));
   if (!object) return text("Not found", 404);
 
   const headers = new Headers();
@@ -169,73 +204,154 @@ async function servePhoto(request, env, id) {
   return new Response(request.method === "HEAD" ? null : object.body, { headers });
 }
 
-async function updateProfile(request, env) {
+async function readImage(request) {
+  const declaredSize = Number(request.headers.get("Content-Length") ?? 0);
+  if (declaredSize > MAX_BYTES) return { error: text("Photo is larger than 20 MB", 413) };
+
+  const body = new Uint8Array(await request.arrayBuffer());
+  if (body.length === 0) return { error: text("No photo received", 400) };
+  if (body.length > MAX_BYTES) return { error: text("Photo is larger than 20 MB", 413) };
+
+  const contentType = detectImageType(body);
+  if (!contentType) return { error: text("Use a JPEG, PNG, WebP or GIF image", 415) };
+  return { body, contentType };
+}
+
+async function storePhoto(request, env) {
+  const image = await readImage(request);
+  if (image.error) return image;
+  const id = crypto.randomUUID();
+  await env.IMAGES.put(photoKey(id), image.body, { httpMetadata: { contentType: image.contentType } });
+  return { id };
+}
+
+const removePhotoFiles = (env, id) =>
+  Promise.all([env.IMAGES.delete(photoKey(id)), env.IMAGES.delete(thumbKey(id))]);
+
+function photoList(site, id) {
+  if (site.unsorted.includes(id)) return { owner: site, key: "unsorted" };
+  const service = Object.values(site.services).find((item) => item.photos.includes(id));
+  return service ? { owner: service, key: "photos" } : null;
+}
+
+const hasPhoto = (site, id) =>
+  Boolean(photoList(site, id)) || Object.values(SLOTS).some((field) => site[field] === id);
+
+async function updateSettings(request, env) {
   const input = await readJson(request);
   if (!input) return text("Invalid request", 400);
   const phone = normalizePhone(input.phone);
   if (phone === null) return text("Enter a valid phone number", 400);
-  const instagram = normalizeInstagram(input.instagram);
+  const instagram = normalizeSocial(input.instagram, "instagram.com");
   if (instagram === null) return text("Enter an Instagram username or instagram.com link", 400);
+  const facebook = normalizeSocial(input.facebook, "facebook.com");
+  if (facebook === null) return text("Enter a Facebook page name or facebook.com link", 400);
+  const contactEmail = normalizeEmail(input.contactEmail);
+  if (contactEmail === null) return text("Enter a valid email address", 400);
 
   const site = await loadSite(env);
-  site.phone = phone;
-  site.instagram = instagram;
+  Object.assign(site, { phone, instagram, facebook, contactEmail });
   await saveSite(env, site);
   return json(site);
 }
 
-async function createAlbum(request, env) {
+function cleanText(value) {
+  const textValue = String(value ?? "").trim();
+  return textValue.length <= MAX_TEXT ? textValue : null;
+}
+
+async function updateText(request, env) {
   const input = await readJson(request);
-  const name = String(input?.name ?? "").trim();
-  if (name === "" || name.length > 60) return text("Album name must be 1 to 60 characters", 400);
-
+  if (!input) return text("Invalid request", 400);
   const site = await loadSite(env);
-  site.albums.push({ id: crypto.randomUUID(), name, photos: [] });
+  for (const language of ["he", "en"]) {
+    for (const key of TEXT_KEYS) {
+      const value = cleanText(input[language]?.[key]);
+      if (value === null) return text("Text is too long", 400);
+      site.text[language][key] = value;
+    }
+  }
   await saveSite(env, site);
-  return json(site, 201);
-}
-
-async function deleteAlbum(env, albumId) {
-  const site = await loadSite(env);
-  const album = site.albums.find((item) => item.id === albumId);
-  if (!album) return text("Album not found", 404);
-
-  site.albums = site.albums.filter((item) => item.id !== albumId);
-  await saveSite(env, site);
-  await Promise.all(album.photos.map((id) => env.IMAGES.delete(photoKey(id))));
   return json(site);
 }
 
-async function addPhoto(request, env, albumId) {
-  const declaredSize = Number(request.headers.get("Content-Length") ?? 0);
-  if (declaredSize > MAX_BYTES) return text("Photo is larger than 20 MB", 413);
-
-  const body = new Uint8Array(await request.arrayBuffer());
-  if (body.length === 0) return text("No photo received", 400);
-  if (body.length > MAX_BYTES) return text("Photo is larger than 20 MB", 413);
-
-  const contentType = detectImageType(body);
-  if (!contentType) return text("Use a JPEG, PNG, WebP or GIF image", 415);
-
+async function updateServiceText(request, env, slug) {
+  const input = await readJson(request);
+  const he = cleanText(input?.he);
+  const en = cleanText(input?.en);
+  if (he === null || en === null) return text("Text is too long", 400);
   const site = await loadSite(env);
-  const album = site.albums.find((item) => item.id === albumId);
-  if (!album) return text("Album not found", 404);
-
-  const photoId = crypto.randomUUID();
-  await env.IMAGES.put(photoKey(photoId), body, { httpMetadata: { contentType } });
-  album.photos.push(photoId);
+  site.services[slug].text = { he, en };
   await saveSite(env, site);
-  return json(site, 201);
+  return json(site);
 }
 
-async function deletePhoto(env, photoId) {
+async function addServicePhoto(request, env, slug) {
+  const stored = await storePhoto(request, env);
+  if (stored.error) return stored.error;
   const site = await loadSite(env);
-  const album = site.albums.find((item) => item.photos.includes(photoId));
-  if (!album) return text("Photo not found", 404);
-
-  album.photos = album.photos.filter((id) => id !== photoId);
+  site.services[slug].photos.push(stored.id);
   await saveSite(env, site);
-  await env.IMAGES.delete(photoKey(photoId));
+  return json({ ...site, photoId: stored.id }, 201);
+}
+
+async function setSlot(request, env, field) {
+  const stored = await storePhoto(request, env);
+  if (stored.error) return stored.error;
+  const site = await loadSite(env);
+  const previous = site[field];
+  site[field] = stored.id;
+  await saveSite(env, site);
+  if (previous) await removePhotoFiles(env, previous);
+  return json({ ...site, photoId: stored.id }, 201);
+}
+
+async function clearSlot(env, field) {
+  const site = await loadSite(env);
+  const previous = site[field];
+  site[field] = null;
+  await saveSite(env, site);
+  if (previous) await removePhotoFiles(env, previous);
+  return json(site);
+}
+
+async function addThumb(request, env, id) {
+  const image = await readImage(request);
+  if (image.error) return image.error;
+  const site = await loadSite(env);
+  if (!hasPhoto(site, id)) return text("Photo not found", 404);
+  await env.IMAGES.put(thumbKey(id), image.body, { httpMetadata: { contentType: image.contentType } });
+  return json(site);
+}
+
+async function makeCover(env, id) {
+  const site = await loadSite(env);
+  const list = photoList(site, id);
+  if (!list) return text("Photo not found", 404);
+  list.owner[list.key] = [id, ...list.owner[list.key].filter((item) => item !== id)];
+  await saveSite(env, site);
+  return json(site);
+}
+
+async function movePhoto(request, env, id) {
+  const input = await readJson(request);
+  if (!SLUGS.includes(input?.service)) return text("Choose a service", 400);
+  const site = await loadSite(env);
+  const list = photoList(site, id);
+  if (!list) return text("Photo not found", 404);
+  list.owner[list.key] = list.owner[list.key].filter((item) => item !== id);
+  site.services[input.service].photos.push(id);
+  await saveSite(env, site);
+  return json(site);
+}
+
+async function deletePhoto(env, id) {
+  const site = await loadSite(env);
+  const list = photoList(site, id);
+  if (!list) return text("Photo not found", 404);
+  list.owner[list.key] = list.owner[list.key].filter((item) => item !== id);
+  await saveSite(env, site);
+  await removePhotoFiles(env, id);
   return json(site);
 }
 
@@ -248,24 +364,87 @@ async function handleConfig(request, env, identity, pathname) {
     });
   }
 
+  if (pathname === "/config/api/site" && method === "GET") return json(await loadSite(env));
+
   if (method !== "GET" && request.headers.get("Origin") !== new URL(request.url).origin) {
     return text("Request refused", 403);
   }
 
-  if (pathname === "/config/api/profile" && method === "PUT") return updateProfile(request, env);
-  if (pathname === "/config/api/albums" && method === "POST") return createAlbum(request, env);
+  if (pathname === "/config/api/settings" && method === "PUT") return updateSettings(request, env);
+  if (pathname === "/config/api/text" && method === "PUT") return updateText(request, env);
 
-  const albumMatch = pathname.match(API_ALBUM_ROUTE);
-  if (albumMatch && method === "DELETE") return deleteAlbum(env, albumMatch[1]);
+  const service = pathname.match(/^\/config\/api\/services\/([a-z]+)\/(text|photos)$/);
+  if (service && SLUGS.includes(service[1])) {
+    if (service[2] === "text" && method === "PUT") return updateServiceText(request, env, service[1]);
+    if (service[2] === "photos" && method === "POST") return addServicePhoto(request, env, service[1]);
+  }
 
-  const albumPhotosMatch = pathname.match(API_ALBUM_PHOTOS_ROUTE);
-  if (albumPhotosMatch && method === "POST") return addPhoto(request, env, albumPhotosMatch[1]);
+  const slot = pathname.match(/^\/config\/api\/slots\/(hero|portrait)$/);
+  if (slot && method === "POST") return setSlot(request, env, SLOTS[slot[1]]);
+  if (slot && method === "DELETE") return clearSlot(env, SLOTS[slot[1]]);
 
-  const photoMatch = pathname.match(API_PHOTO_ROUTE);
-  if (photoMatch && method === "DELETE") return deletePhoto(env, photoMatch[1]);
+  const photo = pathname.match(API_PHOTO_ROUTE);
+  if (photo) {
+    const [, id, action] = photo;
+    if (!action && method === "DELETE") return deletePhoto(env, id);
+    if (action === "thumb" && method === "PUT") return addThumb(request, env, id);
+    if (action === "cover" && method === "POST") return makeCover(env, id);
+    if (action === "move" && method === "POST") return movePhoto(request, env, id);
+  }
 
   return text("Not found", 404);
 }
+
+async function underDailyLimit(env) {
+  const key = `contact-count/${new Date().toISOString().slice(0, 10)}`;
+  const stored = await env.IMAGES.get(key);
+  const count = stored ? Number((await stored.json()).count) : 0;
+  if (count >= MAX_MESSAGES_PER_DAY) return false;
+  await env.IMAGES.put(key, JSON.stringify({ count: count + 1 }));
+  return true;
+}
+
+async function handleContact(request, env, language) {
+  const prefix = language === "en" ? "/en" : "";
+  const finish = (result) =>
+    new Response(null, { status: 303, headers: { Location: `${prefix}/contact?${result}#form` } });
+
+  const form = await request.formData().catch(() => null);
+  if (!form) return finish("error=missing");
+  const field = (name, limit) => String(form.get(name) ?? "").trim().slice(0, limit);
+  const name = field("name", 100).replace(/[\r\n]+/g, " ");
+  const phone = field("phone", 30);
+  const email = field("email", 254);
+  const service = field("service", 40);
+  const message = field("message", 3000);
+
+  const submittedAt = Number(form.get("started"));
+  const tooFast = !submittedAt || Date.now() - submittedAt < 3000;
+  if (field("website", 100) !== "" || tooFast) return finish("sent=1");
+
+  if (!name || !message || (!phone && !email)) return finish("error=missing");
+  if (email && normalizeEmail(email) === null) return finish("error=email");
+
+  const site = await loadSite(env);
+  if (!env.EMAIL || !site.contactEmail || !(await underDailyLimit(env))) return finish("error=send");
+
+  const serviceName = SERVICES.find((item) => item.slug === service)?.he.name ?? "לא צוין";
+  const lines = [`שם: ${name}`, `טלפון: ${phone || "-"}`, `מייל: ${email || "-"}`, `תחום: ${serviceName}`, "", message];
+  try {
+    await env.EMAIL.send({
+      to: site.contactEmail,
+      from: { email: CONTACT_FROM, name: "האתר של איילת כהן" },
+      subject: `פנייה חדשה מהאתר: ${name}`,
+      text: lines.join("\n"),
+      ...(email ? { replyTo: email } : {}),
+    });
+  } catch {
+    return finish("error=send");
+  }
+  return finish("sent=1");
+}
+
+const ROBOTS = `User-agent: *\nDisallow: /config\nSitemap: https://${MAIN_HOST}/sitemap.xml\n`;
 
 export default {
   async fetch(request, env) {
@@ -273,39 +452,56 @@ export default {
     const { pathname } = url;
     const readOnly = request.method === "GET" || request.method === "HEAD";
 
-    if (pathname === "/api/site") {
-      if (!readOnly) return text("Method not allowed", 405);
-      return json(await loadSite(env));
-    }
-
     const photoMatch = pathname.match(PHOTO_ROUTE);
     if (photoMatch) {
       if (!readOnly) return text("Method not allowed", 405);
-      return servePhoto(request, env, photoMatch[1]);
+      return servePhoto(request, env, photoMatch[1], Boolean(photoMatch[2]));
     }
 
     if (pathname === "/upload" || pathname.startsWith("/upload/")) {
       return Response.redirect(`https://${MAIN_HOST}/config`, 302);
     }
 
-    if (pathname !== "/config" && !pathname.startsWith("/config/")) return text("Not found", 404);
+    if (pathname === "/config" || pathname.startsWith("/config/")) {
+      // Access protects the main domain, so sign-in always happens there.
+      if (url.hostname === WWW_HOST) {
+        return Response.redirect(`https://${MAIN_HOST}${pathname}`, 302);
+      }
 
-    // Access protects the main domain, so sign-in always happens there.
-    if (url.hostname === WWW_HOST) {
-      return Response.redirect(`https://${MAIN_HOST}${pathname}`, 302);
+      if (!env.TEAM_DOMAIN || !env.POLICY_AUD) return text("Config is not available", 403);
+      const token = request.headers.get("Cf-Access-Jwt-Assertion");
+      if (!token) return text("Sign-in required", 403);
+
+      let identity;
+      try {
+        identity = await verifyAccessToken(token, env);
+      } catch {
+        return text("Sign-in required", 403);
+      }
+      return handleConfig(request, env, identity, pathname);
     }
 
-    if (!env.TEAM_DOMAIN || !env.POLICY_AUD) return text("Config is not available", 403);
-    const token = request.headers.get("Cf-Access-Jwt-Assertion");
-    if (!token) return text("Sign-in required", 403);
-
-    let identity;
-    try {
-      identity = await verifyAccessToken(token, env);
-    } catch {
-      return text("Sign-in required", 403);
+    if (pathname === "/robots.txt") return new Response(ROBOTS, { headers: { "Content-Type": "text/plain" } });
+    if (pathname === "/sitemap.xml") {
+      return new Response(renderSitemap(), { headers: { "Content-Type": "application/xml; charset=utf-8" } });
     }
 
-    return handleConfig(request, env, identity, pathname);
+    const language = pathname === "/en" || pathname.startsWith("/en/") ? "en" : "he";
+    const route = (language === "en" ? pathname.slice(3) : pathname).replace(/\/$/, "") || "/";
+
+    if (route === "/contact" && request.method === "POST") return handleContact(request, env, language);
+    if (!readOnly) return text("Method not allowed", 405);
+
+    const page = renderPage({ route, language, url, site: await loadSite(env) });
+    return new Response(request.method === "HEAD" ? null : page.html, {
+      status: page.status,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "public, max-age=0, must-revalidate",
+        "Content-Security-Policy": SECURITY_POLICY,
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+      },
+    });
   },
 };

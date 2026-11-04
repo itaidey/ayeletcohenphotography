@@ -175,6 +175,7 @@ body:has(.menu[open]) .quick-bar { display: none; }
   .gallery a { margin-bottom: 1rem; }
 
   .contact-layout { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); min-height: calc(100svh - 4.5rem); }
+  .contact-layout:not(:has(.contact-form)) { grid-template-columns: 1fr; min-height: 60svh; }
   .contact-lead { display: grid; align-content: center; justify-items: start; padding: 4rem clamp(2rem, 6vw, 5rem); }
   .contact-lead .button { width: auto; }
   .contact-form { align-self: center; padding: 4rem var(--gutter); }

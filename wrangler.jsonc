@@ -11,7 +11,6 @@
   "r2_buckets": [
     { "binding": "IMAGES", "bucket_name": "ayeletcohenphotography-images" }
   ],
-  "send_email": [{ "name": "EMAIL" }],
   "vars": {
     "TEAM_DOMAIN": "https://tight-hall-851d.cloudflareaccess.com",
     "POLICY_AUD": "2433b2c111ef8c52810323518030af9532043cbbf226bef4e11592681d20f0d1"

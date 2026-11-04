@@ -261,7 +261,7 @@ function galleryPage(site, language, url) {
   });
 }
 
-function contactPage(site, language, url) {
+function contactPage(site, language, url, canEmail) {
   const copy = COPY[language];
   const form = copy.form;
   const params = url.searchParams;
@@ -286,7 +286,7 @@ function contactPage(site, language, url) {
       <p>${copy.contactLead}</p>
       ${site.phone ? `<a class="button" href="${escapeHtml(whatsappLink(site.phone))}" rel="noopener">${copy.whatsapp}</a>` : ""}
     </section>
-    <section class="contact-form" id="form">
+    ${canEmail ? `<section class="contact-form" id="form">
       <h2>${form.title}</h2>
       ${notice}
       <form method="post" action="${localPath(language, "/contact")}">
@@ -300,17 +300,17 @@ function contactPage(site, language, url) {
         <label>${form.message}<textarea name="message" required rows="5" maxlength="3000"></textarea></label>
         <button class="button" type="submit">${form.send}</button>
       </form>
-    </section>
+    </section>` : ""}
     </div>`,
   });
 }
 
-export function renderPage({ route, language, url, site }) {
+export function renderPage({ route, language, url, site, canEmail }) {
   if (route === "/") return { status: 200, html: homePage(site, language, url) };
   if (route === "/about") return { status: 200, html: aboutPage(site, language, url) };
   if (route === "/services") return { status: 200, html: servicesPage(site, language, url) };
   if (route === "/gallery") return { status: 200, html: galleryPage(site, language, url) };
-  if (route === "/contact") return { status: 200, html: contactPage(site, language, url) };
+  if (route === "/contact") return { status: 200, html: contactPage(site, language, url, canEmail) };
 
   const service = SERVICES.find((item) => route === `/services/${item.slug}`);
   if (service) return { status: 200, html: servicePage(site, language, service, url) };

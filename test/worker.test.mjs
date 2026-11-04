@@ -257,6 +257,13 @@ test("the contact form emails the saved address", async () => {
   assert.match(message.text, /ניו בורן/);
   assert.match(await html("/contact?sent=1", e), /ההודעה נשלחה/);
 });
+test("the form only shows when email can be sent", async () => {
+  assert.doesNotMatch(await html("/contact", env()), /<form/);
+  assert.match(await html("/contact", await contactEnv()), /<form/);
+  const noBinding = await contactEnv();
+  delete noBinding.EMAIL;
+  assert.doesNotMatch(await html("/contact", noBinding), /<form/);
+});
 test("the contact form validates input and traps bots", async () => {
   const e = await contactEnv();
   assert.match((await contact(e, { name: "a", message: "b" })).headers.get("Location"), /error=missing/);

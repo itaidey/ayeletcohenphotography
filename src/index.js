@@ -492,7 +492,8 @@ export default {
     if (route === "/contact" && request.method === "POST") return handleContact(request, env, language);
     if (!readOnly) return text("Method not allowed", 405);
 
-    const page = renderPage({ route, language, url, site: await loadSite(env) });
+    const site = await loadSite(env);
+    const page = renderPage({ route, language, url, site, canEmail: Boolean(env.EMAIL && site.contactEmail) });
     return new Response(request.method === "HEAD" ? null : page.html, {
       status: page.status,
       headers: {

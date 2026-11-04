@@ -11,7 +11,7 @@ the site root and English pages are under `/en`.
 - Settings and photos are stored in the `ayeletcohenphotography-images` R2 bucket.
 - `/config` is protected by the Cloudflare Access application "Upload image".
   Manage allowed emails in that application's policy, not in this repo.
-- The contact form needs Email Routing on the domain and a verified destination
-  address, which is set on the settings page.
+- The contact form stays hidden until Email Routing is on, a `send_email` binding
+  named `EMAIL` is added to `wrangler.jsonc`, and a verified address is saved in /config.
 
 Run `npm test` for the Worker tests. Pushing to `main` deploys the site.

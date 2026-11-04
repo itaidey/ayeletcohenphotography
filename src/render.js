@@ -2,7 +2,7 @@ import { COPY, SERVICES } from "./content.js";
 
 const ORIGIN = "https://ayeletcohenphotography.com";
 const FONTS = "https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;600&family=Bellefair&display=swap";
-const TINTS = ["blush", "sage", "sky", "butter"];
+const TINTS = ["blush", "sage", "sky", "lilac", "butter"];
 
 const escapeHtml = (value) =>
   String(value ?? "").replace(
@@ -72,6 +72,9 @@ function layout({ language, route, title, description, body, site, url }) {
   };
   const links = socialLinks(site, language);
   const sent = route === "/contact" && url?.search;
+  const quickBar = route === "/contact" ? "" : `<nav class="quick-bar" aria-label="${copy.book}">${
+    site.phone ? `<a href="${escapeHtml(whatsappLink(site.phone))}" rel="noopener">${copy.whatsappShort}</a>` : ""
+  }${bookButton(language)}</nav>`;
 
   return `<!doctype html>
 <html lang="${language}" dir="${copy.dir}">
@@ -107,6 +110,7 @@ function layout({ language, route, title, description, body, site, url }) {
     <a class="language" href="${localPath(other, route)}" lang="${other}" hreflang="${other}">${copy.otherLanguage}</a>
   </header>
   <main>${body}</main>
+  ${quickBar}
   <footer class="site-footer">
     <p class="footer-name">${copy.siteTitle}</p>
     ${links.length ? `<div class="footer-links">${links.join("")}</div>` : ""}
@@ -121,17 +125,14 @@ const bookButton = (language, className = "button") =>
 function serviceGrid(site, language) {
   return `<ul class="service-grid">${SERVICES.map((service) => {
     const cover = servicePhotos(site, service.slug)[0];
-    return `<li><a href="${localPath(language, `/services/${service.slug}`)}"><span class="arch tint-${tint(service.slug)}">${
-      cover ? image(cover, service[language].title, "(min-width: 900px) 25vw, 50vw") : ""
+    return `<li><a class="mat-card tint-${tint(service.slug)}" href="${localPath(language, `/services/${service.slug}`)}"><span class="print">${
+      cover ? image(cover, service[language].title, "(min-width: 800px) 25vw, 74vw") : ""
     }</span><span class="service-name">${service[language].name}</span></a></li>`;
   }).join("")}</ul>`;
 }
 
 function homePage(site, language, url) {
   const copy = COPY[language];
-  const hero = site.heroPhoto
-    ? image(site.heroPhoto, copy.photoAlt, "100vw", { eager: true, className: "hero-photo" })
-    : "";
   const portrait = site.portraitPhoto ?? allPhotos(site)[0];
   return layout({
     language,
@@ -140,16 +141,16 @@ function homePage(site, language, url) {
     site,
     description: copy.description,
     body: `
-    <section class="hero${site.heroPhoto ? " has-photo" : ""}">
-      ${hero}
-      <div class="hero-text">
-        <p>${escapeHtml(textFor(site, language, "heroTagline"))}</p>
+    <section class="hero">
+      <div class="hero-print">${site.heroPhoto ? image(site.heroPhoto, copy.photoAlt, "100vw", { eager: true }) : ""}</div>
+      <div class="hero-label">
         <h1>${escapeHtml(textFor(site, language, "heroTitle"))}</h1>
-        ${bookButton(language, "button button-light")}
+        <p>${escapeHtml(textFor(site, language, "heroTagline"))}</p>
+        ${bookButton(language)}
       </div>
     </section>
     <section class="intro">
-      <div class="arch tint-sage">${portrait ? image(portrait, copy.portraitAlt, "(min-width: 800px) 40vw, 90vw") : ""}</div>
+      <div class="mat tint-sage"><span class="print">${portrait ? image(portrait, copy.portraitAlt, "(min-width: 800px) 40vw, 90vw") : ""}</span></div>
       <div class="prose">
         <h2>${copy.meetTitle}</h2>
         ${paragraphs(textFor(site, language, "intro"))}
@@ -158,16 +159,10 @@ function homePage(site, language, url) {
     </section>
     <section class="services-band">
       <h2>${copy.servicesTitle}</h2>
+      <p>${copy.servicesIntro}</p>
       ${serviceGrid(site, language)}
-    </section>
-    ${instagramBand(site, language)}`,
+    </section>`,
   });
-}
-
-function instagramBand(site, language) {
-  if (!site.instagram) return "";
-  const copy = COPY[language];
-  return `<section class="follow tint-blush"><h2>${copy.followTitle}</h2><a class="button" href="${escapeHtml(site.instagram)}" rel="noopener">${copy.instagram}</a></section>`;
 }
 
 function aboutPage(site, language, url) {
@@ -181,14 +176,13 @@ function aboutPage(site, language, url) {
     description: copy.description,
     body: `
     <section class="about">
-      <div class="arch tint-blush">${site.portraitPhoto ? image(site.portraitPhoto, copy.portraitAlt, "(min-width: 800px) 40vw, 90vw", { eager: true }) : ""}</div>
+      <div class="mat tint-blush"><span class="print">${site.portraitPhoto ? image(site.portraitPhoto, copy.portraitAlt, "(min-width: 800px) 40vw, 90vw", { eager: true }) : ""}</span></div>
       <div class="prose">
         <h1>${copy.meetTitle}</h1>
         ${paragraphs(textFor(site, language, "about"))}
         ${bookButton(language)}
       </div>
-    </section>
-    ${instagramBand(site, language)}`,
+    </section>`,
   });
 }
 
@@ -206,10 +200,11 @@ function servicesPage(site, language, url) {
     <section class="service-list">${SERVICES.map((service) => {
       const cover = servicePhotos(site, service.slug)[0];
       return `<article>
-        <div class="arch tint-${tint(service.slug)}">${cover ? image(cover, service[language].title, "(min-width: 800px) 40vw, 90vw") : ""}</div>
+        <a class="mat tint-${tint(service.slug)}" href="${localPath(language, `/services/${service.slug}`)}" tabindex="-1" aria-hidden="true"><span class="print">${cover ? image(cover, service[language].title, "(min-width: 800px) 45vw, 90vw") : ""}</span></a>
         <div class="prose">
           <h2><a href="${localPath(language, `/services/${service.slug}`)}">${service[language].name}</a></h2>
           ${paragraphs(serviceText(site, language, service))}
+          <a class="text-link" href="${localPath(language, `/services/${service.slug}`)}">${copy.seeMore}</a>
         </div>
       </article>`;
     }).join("")}</section>`,
@@ -217,7 +212,8 @@ function servicesPage(site, language, url) {
 }
 
 function gallery(ids, alt) {
-  return `<div class="gallery">${ids
+  const size = ids.length === 1 ? " gallery-single" : ids.length === 2 ? " gallery-pair" : "";
+  return `<div class="gallery${size}">${ids
     .map((id) => `<a href="/photos/${id}">${image(id, alt, "(min-width: 900px) 33vw, 50vw")}</a>`)
     .join("")}</div>`;
 }
@@ -225,7 +221,7 @@ function gallery(ids, alt) {
 function servicePage(site, language, service, url) {
   const copy = COPY[language];
   const text = serviceText(site, language, service);
-  const photos = servicePhotos(site, service.slug);
+  const [cover, ...photos] = servicePhotos(site, service.slug);
   return layout({
     language,
     route: `/services/${service.slug}`,
@@ -234,13 +230,16 @@ function servicePage(site, language, service, url) {
     title: service[language].title,
     description: text.split("\n")[0].slice(0, 160),
     body: `
-    <section class="page-head tint-${tint(service.slug)}">
-      <h1>${service[language].title}</h1>
-      <div class="prose">${paragraphs(text)}</div>
-      ${bookButton(language)}
+    <section class="service-head tint-${tint(service.slug)}">
+      <div class="service-cover">${cover ? image(cover, service[language].title, "(min-width: 800px) 58vw, 100vw", { eager: true }) : ""}</div>
+      <div class="prose">
+        <h1>${service[language].title}</h1>
+        ${paragraphs(text)}
+        ${bookButton(language)}
+      </div>
     </section>
     <section class="gallery-section">
-      ${photos.length ? gallery(photos, service[language].title) : `<p class="empty">${copy.serviceEmpty}</p>`}
+      ${photos.length ? gallery(photos, service[language].title) : cover ? "" : `<p class="empty">${copy.serviceEmpty}</p>`}
       <p class="after-gallery"><a class="text-link" href="${localPath(language, "/services")}">${copy.allServices}</a></p>
     </section>`,
   });
@@ -281,7 +280,8 @@ function contactPage(site, language, url) {
     title: copy.contactTitle,
     description: copy.description,
     body: `
-    <section class="page-head tint-sky">
+    <div class="contact-layout">
+    <section class="contact-lead tint-sky">
       <h1>${copy.contactTitle}</h1>
       <p>${copy.contactLead}</p>
       ${site.phone ? `<a class="button" href="${escapeHtml(whatsappLink(site.phone))}" rel="noopener">${copy.whatsapp}</a>` : ""}
@@ -300,7 +300,8 @@ function contactPage(site, language, url) {
         <label>${form.message}<textarea name="message" required rows="5" maxlength="3000"></textarea></label>
         <button class="button" type="submit">${form.send}</button>
       </form>
-    </section>`,
+    </section>
+    </div>`,
   });
 }
 

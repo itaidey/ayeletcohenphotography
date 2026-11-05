@@ -150,6 +150,13 @@ test("contact details are validated and normalized", async () => {
   assert.doesNotMatch(page, /a@b\.co/);
   assert.equal((await get("/api/site", e)).status, 404);
 });
+test("the footer shows WhatsApp and Instagram icons beside their links", async () => {
+  const e = env();
+  await api(e, "PUT", "/config/api/settings", { phone: "050-123-4567", instagram: "@ayelet" });
+  const footer = (await html("/", e)).split('class="site-footer"')[1];
+  assert.match(footer, /wa\.me\/972501234567"[^>]*><svg class="icon"/);
+  assert.match(footer, /instagram\.com\/ayelet\/"[^>]*><svg class="icon"/);
+});
 test("all pages render in both languages with search tags", async () => {
   const e = env();
   for (const route of ["", "/about", "/services", "/gallery", "/contact", "/services/weddings", "/services/business"]) {
